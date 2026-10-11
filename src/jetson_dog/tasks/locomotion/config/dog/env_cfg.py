@@ -1,217 +1,436 @@
-# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
-# All rights reserved.
-#
-# SPDX-License-Identifier: BSD-3-Clause
+"""
+Jetson Dog locomotion environments.
 
-import math
+Isaac Lab 3.0
+Isaac Sim 6.1.0
+Python 3.12
 
-import isaaclab.sim as sim_utils
-from isaaclab.assets import ArticulationCfg, AssetBaseCfg
-from isaaclab.envs import ManagerBasedRLEnvCfg
-from isaaclab.managers import EventTermCfg as EventTerm
-from isaaclab.managers import ObservationGroupCfg as ObsGroup
-from isaaclab.managers import ObservationTermCfg as ObsTerm
+Environments:
+    JetsonDogStandEnvCfg
+    JetsonDogWalkEnvCfg
+
+Based on NVIDIA Unitree Go2 flat velocity task.
+"""
+
 from isaaclab.managers import RewardTermCfg as RewTerm
-from isaaclab.managers import SceneEntityCfg
-from isaaclab.managers import TerminationTermCfg as DoneTerm
-from isaaclab.physics import PhysxAutoCfg
-from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.utils import configclass
-from isaaclab.visualizers import VisualizerCfg
-from isaaclab_newton.physics import KaminoPADMMSolverCfg, MJWarpSolverCfg, NewtonCfg
-from isaaclab_ov.physics import OvPhysxCfg
-from isaaclab_physx.physics import PhysxCfg
+from isaaclab.utils import configclass, replace
 
-from isaaclab_tasks.utils import PresetCfg
+from isaaclab_tasks.core.velocity.config.go2.flat_env_cfg import (
+    UnitreeGo2FlatEnvCfg,
+)
 
-from ... import mdp
+from isaaclab_tasks.core.velocity.config.go2.rough_env_cfg import (
+    UnitreeGo2Rewards,
+)
 
-##
-# Pre-defined configs
-##
+from jetson_dog.assets.dog import (
+    DOG_CFG,
+    STANDING_HEIGHT,
+)
 
-from isaaclab_assets.robots.cartpole import CARTPOLE_CFG  # isort:skip
-
-
-@configclass
-class LocomotionPhysicsCfg(PresetCfg):
-    """Physics presets for the cart-pole environment."""
-
-    isaacsim_physx: PhysxCfg = PhysxCfg()
-    ovphysx: OvPhysxCfg = OvPhysxCfg()
-    physx: PhysxAutoCfg = PhysxAutoCfg(isaacsim_physx=isaacsim_physx, ovphysx=ovphysx)
-    newton_mjwarp: NewtonCfg = NewtonCfg(
-        solver_cfg=MJWarpSolverCfg(
-            njmax=5,
-            nconmax=3,
-            cone="pyramidal",
-            impratio=1,
-            integrator="implicitfast",
-        ),
-        num_substeps=1,
-        debug_mode=False,
-        use_cuda_graph=True,
-    )
-    newton_kamino: NewtonCfg = NewtonCfg(
-        solver_cfg=KaminoPADMMSolverCfg(sparse_jacobian=True),
-        debug_mode=False,
-        use_cuda_graph=True,
-    )
-    default: NewtonCfg = newton_mjwarp
+from jetson_dog.tasks.locomotion.mdp.rewards import (
+    joint_posture_l2,
+)
 
 
-##
-# Scene definition
-##
-
+# ============================================================
+# CUSTOM REWARDS
+# ============================================================
 
 @configclass
-class LocomotionSceneCfg(InteractiveSceneCfg):
-    """Configuration for a cart-pole scene."""
+class JetsonDogRewards(UnitreeGo2Rewards):
+    """
+    Extend NVIDIA Go2 rewards with posture tracking.
+    """
 
-    # ground plane
-    ground = AssetBaseCfg(
-        prim_path="/World/ground",
-        spawn=sim_utils.GroundPlaneCfg(size=(100.0, 100.0)),
-    )
-
-    # robot
-    robot: ArticulationCfg = CARTPOLE_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
-
-    # lights
-    dome_light = AssetBaseCfg(
-        prim_path="/World/DomeLight",
-        spawn=sim_utils.DomeLightCfg(color=(0.9, 0.9, 0.9), intensity=500.0),
+    joint_posture = RewTerm(
+        func=joint_posture_l2,
+        weight=-0.1,
     )
 
 
-##
-# MDP settings
-##
-
+# ============================================================
+# BASE ENVIRONMENT
+# ============================================================
 
 @configclass
-class ActionsCfg:
-    """Action specifications for the MDP."""
+class JetsonDogBaseEnvCfg(UnitreeGo2FlatEnvCfg):
+    """
+    Shared configuration for standing and walking.
+    """
 
-    joint_effort = mdp.JointEffortActionCfg(asset_name="robot", joint_names=["slider_to_cart"], scale=100.0)
+    rewards: JetsonDogRewards = JetsonDogRewards()
 
+    def __post_init__(self):
 
-@configclass
-class ObservationsCfg:
-    """Observation specifications for the MDP."""
+        super().__post_init__()
 
-    @configclass
-    class PolicyCfg(ObsGroup):
-        """Observations for policy group."""
+        # ----------------------------------------------------
+        # PHYSICS BACKEND
+        # ----------------------------------------------------
 
-        # observation terms (order preserved)
-        joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel)
-        joint_vel_rel = ObsTerm(func=mdp.joint_vel_rel)
+        # Isaac Lab 3.0 Go2 Flat defaults to Newton.
+        # Explicitly use Isaac Sim PhysX for this USD model.
 
-        def __post_init__(self) -> None:
-            self.enable_corruption = False
-            self.concatenate_terms = True
+        self.sim.physics.default = (
+            self.sim.physics.isaacsim_physx
+        )
 
-    # observation groups
-    policy: PolicyCfg = PolicyCfg()
+        self.sim.use_newton_actuators = False
 
+        # ----------------------------------------------------
+        # ROBOT
+        # ----------------------------------------------------
 
-@configclass
-class EventCfg:
-    """Configuration for events."""
+        self.scene.robot = replace(
+            DOG_CFG,
+            prim_path="{ENV_REGEX_NS}/Robot",
+        )
 
-    # reset
-    reset_cart_position = EventTerm(
-        func=mdp.reset_joints_by_offset,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=["slider_to_cart"]),
-            "position_range": (-1.0, 1.0),
-            "velocity_range": (-0.5, 0.5),
-        },
-    )
+        # ----------------------------------------------------
+        # TERRAIN
+        # ----------------------------------------------------
 
-    reset_pole_position = EventTerm(
-        func=mdp.reset_joints_by_offset,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=["cart_to_pole"]),
-            "position_range": (-0.25 * math.pi, 0.25 * math.pi),
-            "velocity_range": (-0.25 * math.pi, 0.25 * math.pi),
-        },
-    )
+        self.scene.terrain.terrain_type = "plane"
 
+        self.scene.terrain.terrain_generator = None
 
-@configclass
-class RewardsCfg:
-    """Reward terms for the MDP."""
+        self.scene.height_scanner = None
 
-    # (1) Constant running reward
-    alive = RewTerm(func=mdp.is_alive, weight=1.0)
-    # (2) Failure penalty
-    terminating = RewTerm(func=mdp.is_terminated, weight=-2.0)
-    # (3) Primary task: keep pole upright
-    pole_pos = RewTerm(
-        func=mdp.joint_pos_target_l2,
-        weight=-1.0,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["cart_to_pole"]), "target": 0.0},
-    )
-    # (4) Shaping tasks: lower cart velocity
-    cart_vel = RewTerm(
-        func=mdp.joint_vel_l1,
-        weight=-0.01,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["slider_to_cart"])},
-    )
-    # (5) Shaping tasks: lower pole angular velocity
-    pole_vel = RewTerm(
-        func=mdp.joint_vel_l1,
-        weight=-0.005,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["cart_to_pole"])},
-    )
+        # ----------------------------------------------------
+        # OBSERVATIONS
+        # ----------------------------------------------------
 
+        self.observations.policy.height_scan = None
 
-@configclass
-class TerminationsCfg:
-    """Termination terms for the MDP."""
+        # ----------------------------------------------------
+        # SCENE
+        # ----------------------------------------------------
 
-    # (1) Time out
-    time_out = DoneTerm(func=mdp.time_out, time_out=True)
-    # (2) Cart out of bounds
-    cart_out_of_bounds = DoneTerm(
-        func=mdp.joint_pos_out_of_manual_limit,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["slider_to_cart"]), "bounds": (-3.0, 3.0)},
-    )
+        # Start with fewer environments.
+        # Increase after verifying stability.
 
+        self.scene.num_envs = 256
 
-##
-# Environment configuration
-##
+        self.scene.env_spacing = 1.5
 
+        # ----------------------------------------------------
+        # SIMULATION
+        # ----------------------------------------------------
 
-@configclass
-class LocomotionEnvCfg(ManagerBasedRLEnvCfg):
-    """Configuration for the cart-pole environment."""
+        # Physics: 200 Hz
+        self.sim.dt = 0.005
 
-    # Scene settings
-    scene: LocomotionSceneCfg = LocomotionSceneCfg(num_envs=4096, env_spacing=4.0)
-    # Basic settings
-    observations: ObservationsCfg = ObservationsCfg()
-    actions: ActionsCfg = ActionsCfg()
-    events: EventCfg = EventCfg()
-    # MDP settings
-    rewards: RewardsCfg = RewardsCfg()
-    terminations: TerminationsCfg = TerminationsCfg()
+        # Control: 50 Hz
+        self.decimation = 4
 
-    # Post initialization
-    def __post_init__(self) -> None:
-        """Post initialization."""
-        # general settings
-        self.decimation = 2
-        self.episode_length_s = 5
-        # visualizer camera settings
-        self.sim.default_visualizer_cfg = VisualizerCfg(eye=(8.0, 0.0, 5.0))
-        # simulation settings
-        self.sim.dt = 1 / 120
         self.sim.render_interval = self.decimation
-        self.sim.physics = LocomotionPhysicsCfg()
+
+        # ----------------------------------------------------
+        # ACTIONS
+        # ----------------------------------------------------
+
+        self.actions.joint_pos.scale = 0.15
+
+        # ----------------------------------------------------
+        # CONTACT SENSORS
+        # ----------------------------------------------------
+
+        self.scene.contact_forces.prim_path = (
+            "{ENV_REGEX_NS}/Robot/[^/]*"
+        )
+
+        self.scene.contact_forces.update_period = (
+            self.sim.dt
+        )
+
+        # ----------------------------------------------------
+        # REWARDS
+        # ----------------------------------------------------
+
+        # Base height target
+
+        self.rewards.base_height_l2.params[
+            "target_height"
+        ] = STANDING_HEIGHT
+
+        self.rewards.base_height_l2.params[
+            "sensor_cfg"
+        ] = None
+
+        # Foot name mapping
+
+        self.rewards.feet_air_time.params[
+            "sensor_cfg"
+        ].body_names = ".*_foot"
+
+        # ----------------------------------------------------
+        # TERMINATIONS
+        # ----------------------------------------------------
+
+        # Your base body is named base_link, not base.
+
+        self.terminations.base_contact.params[
+            "sensor_cfg"
+        ].body_names = "base_link"
+
+        # ----------------------------------------------------
+        # EVENTS
+        # ----------------------------------------------------
+
+        # Disable mass / COM randomization until the
+        # actual robot mass properties are validated.
+
+        self.events.base_external_force_torque = None
+
+        self.events.add_base_mass = None
+
+        self.events.base_com = None
+
+        # Disable random pushes initially.
+
+        self.events.push_robot = None
+
+        # Disable terrain curriculum.
+
+        self.curriculum.terrain_levels = None
+
+        # ----------------------------------------------------
+        # EPISODE
+        # ----------------------------------------------------
+
+        self.episode_length_s = 20.0
+
+
+# ============================================================
+# STAGE 1: STANDING
+# ============================================================
+
+@configclass
+class JetsonDogStandEnvCfg(JetsonDogBaseEnvCfg):
+    """
+    Stage 1:
+
+    Learn to remain standing with zero commanded
+    linear and angular velocity.
+    """
+
+    def __post_init__(self):
+
+        super().__post_init__()
+
+        # ----------------------------------------------------
+        # COMMANDS
+        # ----------------------------------------------------
+
+        self.commands.base_velocity.heading_command = False
+
+        self.commands.base_velocity.rel_heading_envs = 0.0
+
+        self.commands.base_velocity.rel_standing_envs = 1.0
+
+        self.commands.base_velocity.ranges.lin_vel_x = (
+            0.0, 0.0
+        )
+
+        self.commands.base_velocity.ranges.lin_vel_y = (
+            0.0, 0.0
+        )
+
+        self.commands.base_velocity.ranges.ang_vel_z = (
+            0.0, 0.0
+        )
+
+        # ----------------------------------------------------
+        # ACTIONS
+        # ----------------------------------------------------
+
+        self.actions.joint_pos.scale = 0.15
+
+        # ----------------------------------------------------
+        # REWARDS
+        # ----------------------------------------------------
+
+        # Track zero forward/lateral velocity.
+
+        self.rewards.track_lin_vel_xy_exp.weight = 2.0
+
+        # Track zero yaw velocity.
+
+        self.rewards.track_ang_vel_z_exp.weight = 1.0
+
+        # Keep the body upright.
+
+        self.rewards.flat_orientation_l2.weight = -2.5
+
+        # Maintain body height.
+
+        self.rewards.base_height_l2.weight = -20.0
+
+        # Maintain standing joint posture.
+
+        self.rewards.joint_posture.weight = -0.3
+
+        # Reduce vertical movement.
+
+        self.rewards.lin_vel_z_l2.weight = -2.0
+
+        # Reduce roll/pitch angular motion.
+
+        self.rewards.ang_vel_xy_l2.weight = -0.1
+
+        # Reduce sudden action changes.
+
+        self.rewards.action_rate_l2.weight = -0.02
+
+        # Reduce excessive torques.
+
+        self.rewards.dof_torques_l2.weight = -0.0002
+
+        # No foot air-time reward for standing.
+
+        self.rewards.feet_air_time = None
+
+        # ----------------------------------------------------
+        # RESET
+        # ----------------------------------------------------
+
+        self.events.reset_base.params[
+            "pose_range"
+        ] = {
+            "x": (0.0, 0.0),
+            "y": (0.0, 0.0),
+            "yaw": (-0.05, 0.05),
+        }
+
+        self.events.reset_base.params[
+            "velocity_range"
+        ] = {
+            "x": (-0.05, 0.05),
+            "y": (-0.05, 0.05),
+            "z": (-0.02, 0.02),
+            "roll": (-0.05, 0.05),
+            "pitch": (-0.05, 0.05),
+            "yaw": (-0.05, 0.05),
+        }
+
+        # Keep joints close to the initial standing pose.
+
+        self.events.reset_robot_joints.params[
+            "position_range"
+        ] = (0.97, 1.03)
+
+
+# ============================================================
+# STAGE 2: WALKING
+# ============================================================
+
+@configclass
+class JetsonDogWalkEnvCfg(JetsonDogBaseEnvCfg):
+    """
+    Stage 2:
+
+    Learn velocity tracking after standing training.
+
+    Commands:
+        Forward
+        Backward
+        Turning
+    """
+
+    def __post_init__(self):
+
+        super().__post_init__()
+
+        # ----------------------------------------------------
+        # COMMANDS
+        # ----------------------------------------------------
+
+        self.commands.base_velocity.heading_command = False
+
+        self.commands.base_velocity.rel_heading_envs = 0.0
+
+        self.commands.base_velocity.rel_standing_envs = 0.1
+
+        self.commands.base_velocity.ranges.lin_vel_x = (
+            -0.3, 0.3
+        )
+
+        self.commands.base_velocity.ranges.lin_vel_y = (
+            -0.1, 0.1
+        )
+
+        self.commands.base_velocity.ranges.ang_vel_z = (
+            -0.6, 0.6
+        )
+
+        # ----------------------------------------------------
+        # ACTIONS
+        # ----------------------------------------------------
+
+        self.actions.joint_pos.scale = 0.25
+
+        # ----------------------------------------------------
+        # REWARDS
+        # ----------------------------------------------------
+
+        # Main objective: velocity tracking.
+
+        self.rewards.track_lin_vel_xy_exp.weight = 2.0
+
+        self.rewards.track_ang_vel_z_exp.weight = 1.0
+
+        # Body stability.
+
+        self.rewards.flat_orientation_l2.weight = -2.5
+
+        # Body height.
+
+        self.rewards.base_height_l2.weight = -10.0
+
+        # Allow joint movement during walking.
+
+        self.rewards.joint_posture.weight = -0.1
+
+        # Motion penalties.
+
+        self.rewards.lin_vel_z_l2.weight = -2.0
+
+        self.rewards.ang_vel_xy_l2.weight = -0.1
+
+        self.rewards.dof_torques_l2.weight = -0.0002
+
+        self.rewards.dof_acc_l2.weight = -2.5e-7
+
+        self.rewards.action_rate_l2.weight = -0.005
+
+        # Encourage feet to lift during movement.
+
+        self.rewards.feet_air_time.weight = 0.02
+
+        # ----------------------------------------------------
+        # RESET
+        # ----------------------------------------------------
+
+        self.events.reset_base.params[
+            "pose_range"
+        ] = {
+            "x": (-0.1, 0.1),
+            "y": (-0.1, 0.1),
+            "yaw": (-0.2, 0.2),
+        }
+
+        self.events.reset_base.params[
+            "velocity_range"
+        ] = {
+            "x": (-0.1, 0.1),
+            "y": (-0.1, 0.1),
+            "z": (-0.05, 0.05),
+            "roll": (-0.1, 0.1),
+            "pitch": (-0.1, 0.1),
+            "yaw": (-0.1, 0.1),
+        }
+
+        self.events.reset_robot_joints.params[
+            "position_range"
+        ] = (0.9, 1.1)

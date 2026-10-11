@@ -1,28 +1,48 @@
-# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
-# All rights reserved.
-#
-# SPDX-License-Identifier: BSD-3-Clause
-
-"""Tests for the project's task registrations."""
+"""
+Test Jetson Dog Gymnasium registrations.
+"""
 
 import gymnasium as gym
 
-import jetson_dog.tasks  # noqa: F401
+import jetson_dog.tasks.locomotion.config.dog
 
 
-def test_task_registrations():
-    """The project tasks must expose valid environment and agent entry points."""
-    expected = {
-        "JetsonDog-Locomotion-Dog": {
-            "entry_point": "isaaclab.envs:ManagerBasedRLEnv",
-            "env_cfg_entry_point": "jetson_dog.tasks.locomotion.config.dog.env_cfg:LocomotionEnvCfg",
-            "default_agent": "rsl_rl",
-        },
-    }
+def test_standing_registration():
 
-    for task_id, expected_values in expected.items():
-        spec = gym.spec(task_id)
-        assert spec.entry_point == expected_values["entry_point"]
-        assert spec.kwargs["env_cfg_entry_point"] == expected_values["env_cfg_entry_point"]
-        if "default_agent" in expected_values:
-            assert spec.kwargs["default_agent"] == expected_values["default_agent"]
+    spec = gym.spec("Jetson-Dog-Stand")
+
+    assert spec.entry_point == (
+        "isaaclab.envs:ManagerBasedRLEnv"
+    )
+
+    assert spec.kwargs["env_cfg_entry_point"].endswith(
+        "JetsonDogStandEnvCfg"
+    )
+
+    assert spec.kwargs["default_agent"] == "rsl_rl"
+
+
+def test_walking_registration():
+
+    spec = gym.spec("Jetson-Dog-Walk")
+
+    assert spec.entry_point == (
+        "isaaclab.envs:ManagerBasedRLEnv"
+    )
+
+    assert spec.kwargs["env_cfg_entry_point"].endswith(
+        "JetsonDogWalkEnvCfg"
+    )
+
+    assert spec.kwargs["default_agent"] == "rsl_rl"
+
+
+def test_ppo_registration():
+
+    stand = gym.spec("Jetson-Dog-Stand")
+
+    walk = gym.spec("Jetson-Dog-Walk")
+
+    assert "rsl_rl_cfg_entry_point" in stand.kwargs
+
+    assert "rsl_rl_cfg_entry_point" in walk.kwargs
